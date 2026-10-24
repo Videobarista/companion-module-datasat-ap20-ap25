@@ -17,7 +17,7 @@
 		"url": "https://github.com/HuisAutomatisering/companion-module-datasat-ap20-ap25/issues"
 	},
 	"dependencies": {
-		"@companion-module/base": "~1.12.1"
+		"@companion-module/base": "~1.14.1"
 	},
 	"devDependencies": {
 		"@companion-module/tools": "^2.8.0",
