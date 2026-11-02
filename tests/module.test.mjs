@@ -30,7 +30,7 @@ describe('a unit that is on', () => {
 			assert.equal(instance.vars.phantom, 'Off')
 			assert.equal(instance.vars.power, 'OK')
 			assert.equal(instance.vars.version, '105.09')
-			assert.equal(instance.vars.serial, '02635')
+			assert.equal(instance.vars.serial, '12345')
 		} finally {
 			await stop()
 		}
@@ -113,6 +113,7 @@ describe('power', () => {
 		try {
 			await waitFor(() => instance.vars.power_state === 'Standby', 3000, 'standby')
 			assert.equal(instance.formats.length, 0)
+			assert.ok(logged(instance, 'info', 'is in standby'))
 			unit.power = 1
 			await waitFor(() => instance.formats.length === 6, 3000, 'lists after power on')
 		} finally {
@@ -129,6 +130,18 @@ describe('power', () => {
 			await waitFor(() => instance.formats.length === 6, 13000, 'lists loaded by the retry')
 			instance.defs.actions.standby.callback()
 			await waitFor(() => unit.received.includes('POWER 0'), 3000, 'POWER 0 sent')
+		} finally {
+			await stop()
+		}
+	})
+
+	it('does not claim standby when the unit has not answered @POWER yet', async () => {
+		// SYSTEM, SERIALNO and POWER all go unanswered, as while the unit is being switched on or off
+		const { instance, stop } = await boot({ silentForMs: 5000 })
+		try {
+			await waitFor(() => logged(instance, 'info', 'did not answer yet'), 6000, 'no-answer message')
+			assert.ok(!logged(instance, 'info', 'is in standby'))
+			await waitFor(() => instance.formats.length === 6, 8000, 'lists once the unit answers')
 		} finally {
 			await stop()
 		}

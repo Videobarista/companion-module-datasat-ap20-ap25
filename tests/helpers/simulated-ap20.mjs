@@ -1,4 +1,4 @@
-// A simulated AP20/AP25 that answers like the real units do (as seen on an AP20 with firmware 105.09):
+// A simulated AP20/AP25 that answers like the real units do (as seen on a real AP20):
 // - lists come back with the command name in front ("FORMATNAMES A,B,") and an empty list as "MACRONAMES"
 // - unknown commands get "BadCommand"
 // - without a valid AUTH everything except SYSTEM and IDENTIFY gets "SECERR"
@@ -81,10 +81,10 @@ export async function startSimulatedUnit(options = {}) {
 
 				switch (keyword) {
 					case 'SYSTEM':
-						socket.write('VER 105.09\nVER_DATE Tue Jun 9 12:27:16 PDT 2020\nMAC 00:50:C2:B2:D6:81\r\0')
+						socket.write('VER 105.09\nVER_DATE Mon Jan 6 10:20:30 PST 2020\nMAC 02:00:00:AA:BB:CC\r\0')
 						break
 					case 'SERIALNO':
-						reply('SERIALNO 02635')
+						reply('SERIALNO 12345')
 						break
 					case 'POWER':
 						if (!unit.supportsPower) {

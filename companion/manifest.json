@@ -3,7 +3,7 @@
 	"name": "Datasat AP20/AP25",
 	"shortname": "ap2x",
 	"description": "Control the Datasat AP20 and AP25 audio processors over TCP (port 14500)",
-	"version": "2.2.0",
+	"version": "2.2.1",
 	"license": "MIT",
 	"repository": "https://github.com/Videobarista/companion-module-datasat-ap20-ap25.git",
 	"bugs": "https://github.com/Videobarista/companion-module-datasat-ap20-ap25/issues",

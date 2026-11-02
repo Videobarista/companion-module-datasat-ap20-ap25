@@ -5,6 +5,18 @@ All notable changes to this module are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.1]
+
+### Fixed
+
+- When the unit did not answer while the module connected (for example while it was being switched on or
+  off), the log said "The unit is in standby". It now says that the unit did not answer yet; the format
+  and macro lists are still loaded as soon as the unit reports that it is on.
+
+### Changed
+
+- The simulated unit in the tests uses made-up identifiers (serial number, MAC address, build date).
+
 ## [2.2.0]
 
 ### Added

@@ -155,13 +155,13 @@ describe('untrusted answers from the unit', () => {
 	it('hides the MAC address and serial number in every log line', async () => {
 		const { instance, stop } = await boot()
 		try {
-			await waitFor(() => instance.vars.serial === '02635', 3000, 'serial')
+			await waitFor(() => instance.vars.serial === '12345', 3000, 'serial')
 			await instance.defs.actions.customCommand.callback({ options: { command: 'SYSTEM' } }, noVariables)
 			await instance.defs.actions.customCommand.callback({ options: { command: 'SERIALNO' } }, noVariables)
 			await waitFor(() => logged(instance, 'info', 'Response to @SERIALNO'), 3000, 'responses logged')
 			const text = allLogText(instance)
-			assert.ok(!text.includes('00:50:C2'))
-			assert.ok(!text.includes('02635'))
+			assert.ok(!text.includes('02:00:00:AA'))
+			assert.ok(!text.includes('12345'))
 		} finally {
 			await stop()
 		}

@@ -50,8 +50,8 @@ describe('name lists', () => {
 describe('answers belong to their own command', () => {
 	it('accepts every answer of the real unit for its own command', () => {
 		const pairs = [
-			['SYSTEM', 'VER 105.09\nVER_DATE Tue Jun 9 12:27:16 PDT 2020\nMAC 00:50:C2:B2:D6:81'],
-			['SERIALNO', 'SERIALNO 02635'],
+			['SYSTEM', 'VER 105.09\nVER_DATE Mon Jan 6 10:20:30 PST 2020\nMAC 02:00:00:AA:BB:CC'],
+			['SERIALNO', 'SERIALNO 12345'],
 			['POWER', 'POWER 1'],
 			['FORMATNAMES', 'FORMATNAMES AES EBU 2ch,Hdmi 1,'],
 			['MACRONAMES', 'MACRONAMES'],
@@ -68,7 +68,7 @@ describe('answers belong to their own command', () => {
 	it('does not take a late answer of another command', () => {
 		assert.equal(isAnswerTo('FORMATNAMES', 'POWER 1'), false)
 		assert.equal(isAnswerTo('MACRONAMES', 'FORMATNAMES AES EBU 2ch'), false)
-		assert.equal(isAnswerTo('POWER', 'SERIALNO 02635'), false)
+		assert.equal(isAnswerTo('POWER', 'SERIALNO 12345'), false)
 		assert.equal(isAnswerTo('FORMAT', 'FORMATNAMES A,B'), false)
 	})
 })
@@ -116,10 +116,10 @@ describe('safe values', () => {
 	it('hides the password, MAC address and serial number in log lines', () => {
 		assert.equal(maskCommand('AUTH Geheim123'), 'AUTH ****')
 		assert.equal(maskCommand('FADER 70'), 'FADER 70')
-		const line = redactForLog('VER 105.09 | VER_DATE Tue Jun 9 12:27:16 PDT 2020 | MAC 00:50:C2:B2:D6:81')
-		assert.ok(!line.includes('00:50:C2'))
-		assert.ok(line.includes('12:27:16'), 'a time of day is not mistaken for a MAC address')
-		assert.equal(redactForLog('SERIALNO 02635'), 'SERIALNO ***')
+		const line = redactForLog('VER 105.09 | VER_DATE Mon Jan 6 10:20:30 PST 2020 | MAC 02:00:00:AA:BB:CC')
+		assert.ok(!line.includes('02:00:00:AA'))
+		assert.ok(line.includes('10:20:30'), 'a time of day is not mistaken for a MAC address')
+		assert.equal(redactForLog('SERIALNO 12345'), 'SERIALNO ***')
 		assert.equal(redactForLog('MAC 080077124578'), 'MAC ***')
 	})
 })

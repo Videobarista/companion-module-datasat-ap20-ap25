@@ -373,8 +373,14 @@ class DatasatAP20Instance extends InstanceBase {
 
 		if (this.canProbeNames()) {
 			await this.loadNames(session)
-		} else {
+		} else if (this.state.power === 0) {
 			this.log('info', 'The unit is in standby: format and macro lists are loaded after power on')
+		} else {
+			// No answer to @POWER yet, for example while the unit is being switched on or off
+			this.log(
+				'info',
+				'The unit did not answer yet: format and macro lists are loaded as soon as it reports that it is on',
+			)
 		}
 		if (!alive()) return
 
