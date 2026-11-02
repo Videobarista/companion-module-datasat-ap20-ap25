@@ -54,5 +54,5 @@ body:
     id: logs
     attributes:
       label: Relevant Companion log output
-      description: Copy the connection log lines here. They are automatically formatted as code.
+      description: Copy the connection log lines here. They are automatically formatted as code. The module already hides the password, MAC address and serial number in its log; check for anything else you would rather not share.
       render: shell

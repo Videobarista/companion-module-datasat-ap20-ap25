@@ -5,9 +5,15 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Read-only token. The shared Bitfocus workflow asks for packages: read; nothing here needs write access.
+permissions:
+  contents: read
+  packages: read
+
 jobs:
   module-checks:
     name: Build and validate module
+    # Kept on @main on purpose: Bitfocus updates these checks to match what the Companion module library requires
     uses: bitfocus/actions/.github/workflows/module-checks.yaml@main
     with:
       upload-artifact: true
