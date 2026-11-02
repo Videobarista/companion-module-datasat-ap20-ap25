@@ -1,3 +1,5 @@
+import { LIMITS, hasControlChars, toBoundedInt } from './parsers.js'
+
 /**
  * A dropdown filled with the names the unit reported, or a plain text field when the unit
  * cannot list them. The dropdown also accepts a typed name, e.g. one that was added after loading.
@@ -22,6 +24,34 @@ export function nameOption(names, id, label, fallbackDefault, useVariables = tru
 	}
 }
 
+/**
+ * A format or macro name that is about to be sent. Names come from the user or from variables, so a
+ * name with control characters (a line break would start a second command) or an over-long name is
+ * refused instead of sent. Spaces are kept: names can end in a space.
+ */
+function nameArgument(self, value, kind) {
+	const name = String(value ?? '')
+	if (name.trim().length === 0) {
+		self.log('warn', `No ${kind} name given`)
+		return null
+	}
+	if (hasControlChars(name) || name.length > LIMITS.nameLength) {
+		self.log(
+			'warn',
+			`Not sent: the ${kind} name contains control characters or is longer than ${LIMITS.nameLength} characters`,
+		)
+		return null
+	}
+	return name
+}
+
+/** '1' or '0' from a mode dropdown, or the opposite of the current state for anything else (toggle). */
+function onOffOrToggle(mode, current) {
+	if (mode === '1') return 1
+	if (mode === '0') return 0
+	return current ? 0 : 1
+}
+
 export function getActions(self) {
 	return {
 		setFader: {
@@ -39,8 +69,12 @@ export function getActions(self) {
 				},
 			],
 			callback: (action) => {
-				const tenths = Math.round(action.options.level * 10)
-				self.sendCommand(`FADER ${tenths}`)
+				const tenths = toBoundedInt(Number(action.options.level) * 10, 0, 100)
+				if (tenths === null) {
+					self.log('warn', 'Set Master Fader Level: the level is not a number')
+					return
+				}
+				self.sendFader(tenths)
 			},
 		},
 
@@ -58,9 +92,14 @@ export function getActions(self) {
 				},
 			],
 			callback: (action) => {
-				let target = self.state.fader + Math.round(action.options.delta * 10)
-				target = Math.max(0, Math.min(100, target))
-				self.sendCommand(`FADER ${target}`)
+				const delta = toBoundedInt(Number(action.options.delta) * 10, -100, 100)
+				if (delta === null) {
+					self.log('warn', 'Adjust Master Fader: the change is not a number')
+					return
+				}
+				// Build on a level that is still on its way, so quick presses add up
+				const target = Math.max(0, Math.min(100, self.faderBase() + delta))
+				self.sendFader(target)
 			},
 		},
 
@@ -80,11 +119,7 @@ export function getActions(self) {
 				},
 			],
 			callback: (action) => {
-				if (action.options.mode === 'toggle') {
-					self.sendCommand(`MUTED ${self.state.muted ? 0 : 1}`)
-				} else {
-					self.sendCommand(`MUTED ${action.options.mode}`)
-				}
+				self.sendCommand(`MUTED ${onOffOrToggle(action.options.mode, self.state.muted)}`)
 			},
 		},
 
@@ -92,8 +127,12 @@ export function getActions(self) {
 			name: 'Select Format',
 			options: [nameOption(self.formats, 'format', 'Format', 'Digital Cinema')],
 			callback: async (action, context) => {
-				const format = await context.parseVariablesInString(String(action.options.format))
-				self.sendCommand(`FORMAT ${format}`)
+				const format = nameArgument(
+					self,
+					await context.parseVariablesInString(String(action.options.format ?? '')),
+					'format',
+				)
+				if (format !== null) self.sendCommand(`FORMAT ${format}`)
 			},
 		},
 
@@ -101,8 +140,12 @@ export function getActions(self) {
 			name: 'Run Macro',
 			options: [nameOption(self.macros, 'macro', 'Macro', '')],
 			callback: async (action, context) => {
-				const macro = await context.parseVariablesInString(String(action.options.macro))
-				self.sendCommand(`RUNMACRO ${macro}`)
+				const macro = nameArgument(
+					self,
+					await context.parseVariablesInString(String(action.options.macro ?? '')),
+					'macro',
+				)
+				if (macro !== null) self.sendCommand(`RUNMACRO ${macro}`)
 			},
 		},
 
@@ -120,7 +163,12 @@ export function getActions(self) {
 				},
 			],
 			callback: (action) => {
-				self.sendCommand(`MONITORLEVEL ${action.options.level}`)
+				const level = toBoundedInt(action.options.level, 0, 100)
+				if (level === null) {
+					self.log('warn', 'Set Monitor Level: the level is not a number')
+					return
+				}
+				self.sendCommand(`MONITORLEVEL ${level}`)
 			},
 		},
 
@@ -140,11 +188,7 @@ export function getActions(self) {
 				},
 			],
 			callback: (action) => {
-				if (action.options.mode === 'toggle') {
-					self.sendCommand(`MONITORMUTE ${self.state.monitorMute ? 0 : 1}`)
-				} else {
-					self.sendCommand(`MONITORMUTE ${action.options.mode}`)
-				}
+				self.sendCommand(`MONITORMUTE ${onOffOrToggle(action.options.mode, self.state.monitorMute)}`)
 			},
 		},
 
@@ -206,13 +250,19 @@ export function getActions(self) {
 				},
 			],
 			callback: (action) => {
-				const gpio = Math.round(Number(action.options.gpio))
-				if (gpio >= 1 && gpio <= 21) self.sendCommand(`PULSE ${gpio}`)
+				const gpio = toBoundedInt(action.options.gpio, -1, 999)
+				if (gpio === null || gpio < 1 || gpio > 21) {
+					self.log('warn', 'GPIO Pulse: the GPIO number must be 1 - 21')
+					return
+				}
+				self.sendCommand(`PULSE ${gpio}`)
 			},
 		},
 
 		customCommand: {
 			name: 'Send Custom Command',
+			description:
+				'Sends any command from the Datasat API and writes the answer to the log. AUTH is not allowed here: set the password in the connection settings.',
 			options: [
 				{
 					type: 'textinput',
@@ -223,9 +273,8 @@ export function getActions(self) {
 				},
 			],
 			callback: async (action, context) => {
-				const cmd = await context.parseVariablesInString(action.options.command)
-				// The answer is written to the Companion log, handy for trying out commands
-				if (cmd.length > 0) self.sendCommand(cmd, { logResponse: true })
+				const cmd = await context.parseVariablesInString(String(action.options.command ?? ''))
+				self.sendCustomCommand(cmd)
 			},
 		},
 	}

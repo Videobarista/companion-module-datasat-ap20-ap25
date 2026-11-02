@@ -1,6 +1,14 @@
 import { combineRgb } from '@companion-module/base'
 import { BOARDS } from './parsers.js'
 import { nameOption } from './actions.js'
+import { drawLevelBar } from './graphics.js'
+
+// Default bar colours
+export const FADER_BAR_COLOR = combineRgb(46, 196, 182)
+export const MONITOR_BAR_COLOR = combineRgb(70, 140, 230)
+
+// Reference level 7.0 on the master fader, shown as a white tick on the fader bar
+const FADER_REFERENCE = 70
 
 export function getFeedbacks(self) {
 	return {
@@ -140,7 +148,8 @@ export function getFeedbacks(self) {
 				},
 			],
 			callback: (feedback) => {
-				const target = Math.round(feedback.options.level * 10)
+				const target = Math.round(Number(feedback.options.level) * 10)
+				if (!Number.isFinite(target)) return false
 				switch (feedback.options.comparison) {
 					case 'gt':
 						return self.state.fader > target
@@ -149,6 +158,53 @@ export function getFeedbacks(self) {
 					default:
 						return self.state.fader === target
 				}
+			},
+		},
+
+		levelBar: {
+			type: 'advanced',
+			name: 'Level bar (master fader or monitor level)',
+			description:
+				'Draws a bar on the button that follows the master fader (0.0 - 10.0, with a tick at 7.0) or the monitor level (0 - 100). This shows the setting, not the audio signal: the unit has no metering command.',
+			options: [
+				{
+					type: 'dropdown',
+					id: 'source',
+					label: 'Show',
+					default: 'fader',
+					choices: [
+						{ id: 'fader', label: 'Master fader' },
+						{ id: 'monitor', label: 'Monitor level' },
+					],
+				},
+				{
+					type: 'dropdown',
+					id: 'position',
+					label: 'Position on the button',
+					default: 'bottom',
+					choices: [
+						{ id: 'bottom', label: 'Bottom' },
+						{ id: 'top', label: 'Top' },
+					],
+				},
+				{
+					type: 'colorpicker',
+					id: 'color',
+					label: 'Bar colour',
+					default: FADER_BAR_COLOR,
+				},
+			],
+			callback: (feedback) => {
+				if (!feedback.image) return {}
+				const monitor = feedback.options.source === 'monitor'
+				return drawLevelBar({
+					width: feedback.image.width,
+					height: feedback.image.height,
+					fraction: (monitor ? self.state.monitorLevel : self.state.fader) / 100,
+					marker: monitor ? null : FADER_REFERENCE / 100,
+					color: Number(feedback.options.color),
+					position: feedback.options.position === 'top' ? 'top' : 'bottom',
+				})
 			},
 		},
 	}

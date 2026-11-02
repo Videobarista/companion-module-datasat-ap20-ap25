@@ -3,13 +3,13 @@
 	"name": "Datasat AP20/AP25",
 	"shortname": "ap2x",
 	"description": "Control the Datasat AP20 and AP25 audio processors over TCP (port 14500)",
-	"version": "2.1.3",
+	"version": "2.2.0",
 	"license": "MIT",
-	"repository": "https://github.com/HuisAutomatisering/companion-module-datasat-ap20-ap25.git",
-	"bugs": "https://github.com/HuisAutomatisering/companion-module-datasat-ap20-ap25/issues",
+	"repository": "https://github.com/Videobarista/companion-module-datasat-ap20-ap25.git",
+	"bugs": "https://github.com/Videobarista/companion-module-datasat-ap20-ap25/issues",
 	"maintainers": [
 		{
-			"name": "Huisautomatisering"
+			"name": "Videobarista"
 		}
 	],
 	"runtime": {
@@ -19,7 +19,20 @@
 		"entrypoint": "../main.js"
 	},
 	"manufacturer": "Datasat",
-	"products": ["AP20", "AP25"],
-	"keywords": ["audio", "cinema", "processor", "datasat", "ap20", "ap25", "ap2x"],
-	"legacyIds": ["datasat-ap2x"]
+	"products": [
+		"AP20",
+		"AP25"
+	],
+	"keywords": [
+		"audio",
+		"cinema",
+		"processor",
+		"datasat",
+		"ap20",
+		"ap25",
+		"ap2x"
+	],
+	"legacyIds": [
+		"datasat-ap2x"
+	]
 }

@@ -1,10 +1,29 @@
 /**
  * Pure helpers for parsing AP20/AP25 responses (TN-H413 rev D plus the
- * RS20i commands that real AP20/AP25 units also accept).
- * Kept free of Companion dependencies so they are easy to reason about.
+ * RS20i commands that real AP20/AP25 units also accept), and for keeping what goes
+ * to and comes from the unit within safe bounds.
+ * Kept free of Companion dependencies so they are easy to reason about and test.
  */
 
 export const BOARDS = ['H331', 'H332', 'H335', 'H336', 'H338']
+
+/** Upper bounds for everything that crosses the wire. */
+export const LIMITS = {
+	/** Longest command line the module will send (without '@' and <CR>). */
+	commandLength: 256,
+	/** Longest password accepted from the connection settings. */
+	passwordLength: 64,
+	/** Unanswered data kept while waiting for a <CR>; beyond this the buffer is dropped. */
+	rxBuffer: 16 * 1024,
+	/** Most format or macro names taken from a list. */
+	names: 100,
+	/** Longest single format or macro name. */
+	nameLength: 64,
+	/** Longest value written into a Companion variable. */
+	valueLength: 128,
+	/** Button presses that may wait in line; more are dropped. */
+	userQueue: 20,
+}
 
 /** Commands whose answer is a bare comma separated list without a command echo. */
 const LIST_COMMANDS = new Set(['FORMATNAMES', 'MACRONAMES'])
@@ -12,12 +31,67 @@ const LIST_COMMANDS = new Set(['FORMATNAMES', 'MACRONAMES'])
 /** Keywords that identify an ordinary, echoed status line (never a name list). */
 const STATUS_LINE = /^(FADER|MUTED|MONITORLEVEL|MONITORMUTE|POWER|FORMAT|HEALTH|AUTH|SERIALNO|VER)\s/
 
+// Control characters (C0 range and DEL). <CR> and <LF> would start a new command on the unit.
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/g
+// eslint-disable-next-line no-control-regex
+const HAS_CONTROL_CHARS = /[\u0000-\u001f\u007f]/
+
 export function commandKeyword(cmd) {
 	return cmd.trim().split(/\s+/)[0].toUpperCase()
 }
 
 export function isListCommand(cmd) {
 	return LIST_COMMANDS.has(commandKeyword(cmd))
+}
+
+export function isAuthCommand(cmd) {
+	return commandKeyword(cmd) === 'AUTH'
+}
+
+/** The command as it may appear in a log line: the password of an AUTH command is never shown. */
+export function maskCommand(cmd) {
+	return isAuthCommand(cmd) ? 'AUTH ****' : cmd
+}
+
+export function hasControlChars(value) {
+	return HAS_CONTROL_CHARS.test(String(value))
+}
+
+/**
+ * Make a user or variable supplied value safe to put inside a command: control characters
+ * (including <CR> and <LF>, which would start a second command) are removed and the length is capped.
+ * Spaces are kept as they are, because format and macro names can end in a space.
+ */
+export function sanitizeArg(value, maxLength = LIMITS.nameLength) {
+	return String(value ?? '')
+		.replace(CONTROL_CHARS, '')
+		.slice(0, maxLength)
+}
+
+/** Round and clamp a number. Returns null when the value is not a finite number. */
+export function toBoundedInt(value, min, max) {
+	const num = typeof value === 'number' ? value : Number(String(value ?? '').trim())
+	if (String(value ?? '').trim() === '' || !Number.isFinite(num)) return null
+	return Math.min(max, Math.max(min, Math.round(num)))
+}
+
+/** Text from the unit as it may be stored in a variable: no control characters, bounded length. */
+export function cleanDeviceText(value, maxLength = LIMITS.valueLength) {
+	return String(value ?? '')
+		.replace(CONTROL_CHARS, '')
+		.slice(0, maxLength)
+}
+
+/**
+ * Hide identifying values in a line that goes to the log: the MAC address in the SYSTEM answer and the
+ * serial number. They stay available in the module itself (the serial number as a variable).
+ */
+export function redactForLog(text) {
+	return String(text)
+		.replace(/\b(MAC\s+)\S+/gi, '$1***')
+		.replace(/\b(SERIALNO\s+)\S+/gi, '$1***')
+		.replace(/\b[0-9A-F]{2}(?::[0-9A-F]{2}){5}\b/gi, '***')
 }
 
 /**
@@ -42,6 +116,17 @@ export function parseNameList(text) {
 		.split(',')
 		.map((name) => name.replace(/^\s+/, ''))
 		.filter((name) => name.trim().length > 0)
+}
+
+/**
+ * Keep a name list within bounds. Names that are too long or contain control characters are skipped
+ * (shortening them would make the unit no longer recognise them), and at most LIMITS.names are kept.
+ * Returns the kept names and how many were left out.
+ */
+export function limitNames(names) {
+	const valid = names.filter((name) => name.length <= LIMITS.nameLength && !hasControlChars(name))
+	const kept = valid.slice(0, LIMITS.names)
+	return { names: kept, skipped: names.length - kept.length }
 }
 
 /** Answers that every command can get. */
@@ -101,6 +186,12 @@ export function parseBinary(value) {
 	return null
 }
 
+/** A temperature as the unit reports it ("41"), or null when it is not a plain number. */
+function parseTemperature(value) {
+	const trimmed = String(value ?? '').trim()
+	return /^-?\d{1,3}(\.\d{1,2})?$/.test(trimmed) ? trimmed : null
+}
+
 /**
  * Parse the part of a HEALTH response after the "HEALTH " prefix.
  *   "TEMPERATURE 34,29,25"
@@ -117,12 +208,13 @@ export function parseHealth(value) {
 	const rest = match[2].trim()
 
 	if (sub === 'TEMPERATURE') {
-		const temps = rest.split(',').map((t) => t.trim())
+		const temps = rest.split(',').slice(0, 3).map(parseTemperature)
+		while (temps.length < 3) temps.push(null)
 		return { kind: 'temperature', temps }
 	}
 
 	const volts = /^(H\d{3})VOLTS$/.exec(sub)
-	if (!volts) return null
+	if (!volts || !BOARDS.includes(volts[1])) return null
 
 	const board = volts[1]
 	if (rest.toUpperCase() === 'NA') {

@@ -1,26 +1,27 @@
 {
 	"name": "companion-module-datasat-ap20-ap25",
-	"version": "2.1.3",
+	"version": "2.2.0",
 	"main": "main.js",
 	"type": "module",
 	"scripts": {
 		"check": "companion-module-check",
 		"format": "prettier -w .",
-		"package": "companion-module-build"
+		"package": "companion-module-build",
+		"test": "node --import ./tests/helpers/register.mjs --test --test-concurrency=1 \"tests/**/*.test.mjs\""
 	},
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/HuisAutomatisering/companion-module-datasat-ap20-ap25.git"
+		"url": "git+https://github.com/Videobarista/companion-module-datasat-ap20-ap25.git"
 	},
 	"bugs": {
-		"url": "https://github.com/HuisAutomatisering/companion-module-datasat-ap20-ap25/issues"
+		"url": "https://github.com/Videobarista/companion-module-datasat-ap20-ap25/issues"
 	},
 	"dependencies": {
-		"@companion-module/base": "~1.15.0"
+		"@companion-module/base": "~1.14.1"
 	},
 	"devDependencies": {
-		"@companion-module/tools": "^2.9.0",
+		"@companion-module/tools": "^2.8.0",
 		"prettier": "^3.9.10"
 	},
 	"prettier": "@companion-module/tools/.prettierrc.json"

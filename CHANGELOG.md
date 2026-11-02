@@ -5,6 +5,47 @@ All notable changes to this module are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.2.0]
+
+### Added
+
+- Level bar feedback: draws a bar on a button for the master fader (with a tick at reference level 7.0)
+  or the monitor level, with a choice of position and colour. New presets "Fader level with bar" and
+  "Monitor level with bar".
+- Presets for fader steps of 0.1 (next to the existing 0.5 steps).
+- Tests that run the module against a simulated AP20/AP25, with a Tests workflow and badge.
+
+### Security
+
+- The password is now a secret field, kept in Companion's secrets store instead of the connection config
+  that Companion sends to its web interface. An existing password is moved automatically on upgrade.
+- Commands with line breaks or other control characters are refused, so a value from a variable can no
+  longer add a second command. Format and macro names, commands and the password have a maximum length.
+- Fader, monitor level and GPIO values are rounded and kept within range; invalid values are not sent.
+- Send Custom Command refuses `AUTH`, so the password can no longer end up in the log that way.
+- A warning is logged when the module authenticates with the Setup password instead of the NetCmd one.
+- Answers from the unit have upper bounds: the receive buffer (16 KB), the number (100) and length (64)
+  of format and macro names, and values written to variables. Temperatures must be numbers.
+- At most 20 button presses wait for the unit; more are dropped with a throttled warning.
+- Polling cannot be set faster than 500 ms (health: 10 s); 0 still switches it off.
+- The IP address field is checked before connecting.
+- The MAC address and serial number are hidden in the log.
+- The module checks workflow now runs with read-only permissions.
+- SECURITY.md describes what the module protects against and the firewall and Companion settings that
+  only the network can provide.
+
+### Fixed
+
+- Quick presses of a relative fader button now add up. Before, every press that came before the unit had
+  answered started from the same level, so five quick presses of +0.1 could end up as a single step.
+
+### Changed
+
+- The repository moved to the Videobarista organisation. All links, the manifest, the maintainer and the
+  copyright notice now point to Videobarista.
+- Send Custom Command accepts a leading `@`.
+- Installation instructions use Companion's Import module package.
+
 ## [2.1.3]
 
 ### Fixed

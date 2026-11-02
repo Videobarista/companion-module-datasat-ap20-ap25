@@ -1,4 +1,5 @@
 import { combineRgb } from '@companion-module/base'
+import { FADER_BAR_COLOR, MONITOR_BAR_COLOR } from './feedbacks.js'
 
 const WHITE = combineRgb(255, 255, 255)
 const BLACK = combineRgb(0, 0, 0)
@@ -73,6 +74,28 @@ export function getPresets(self) {
 		{ actionId: 'faderRelative', options: { delta: -0.5 } },
 	])
 
+	presets['faderUpFine'] = button('Level', 'Fader +0.1', 'VOL\n+0.1', '18', [
+		{ actionId: 'faderRelative', options: { delta: 0.1 } },
+	])
+
+	presets['faderDownFine'] = button('Level', 'Fader -0.1', 'VOL\n-0.1', '18', [
+		{ actionId: 'faderRelative', options: { delta: -0.1 } },
+	])
+
+	presets['faderBar'] = button(
+		'Level',
+		'Fader level with bar (tick at 7.0)',
+		`FADER\n$(${label}:fader)`,
+		'14',
+		[],
+		[
+			{
+				feedbackId: 'levelBar',
+				options: { source: 'fader', position: 'bottom', color: FADER_BAR_COLOR },
+			},
+		],
+	)
+
 	presets['fader70'] = button(
 		'Level',
 		'Fader 7.0 (reference)',
@@ -90,6 +113,21 @@ export function getPresets(self) {
 		'18',
 		[{ actionId: 'monitorMute', options: { mode: 'toggle' } }],
 		[{ feedbackId: 'monitorMute', options: {}, style: { bgcolor: RED, color: WHITE } }],
+	)
+
+	presets['monitorBar'] = button(
+		'Monitor',
+		'Monitor level with bar',
+		`MONITOR\n$(${label}:monitor_level)`,
+		'14',
+		[],
+		[
+			{
+				feedbackId: 'levelBar',
+				options: { source: 'monitor', position: 'bottom', color: MONITOR_BAR_COLOR },
+			},
+			{ feedbackId: 'monitorMute', options: {}, style: { bgcolor: RED, color: WHITE } },
+		],
 	)
 
 	// Power

@@ -6,14 +6,21 @@ import { getPresets } from './presets.js'
 import { UpgradeScripts } from './upgrades.js'
 import {
 	BOARDS,
-	commandKeyword,
+	LIMITS,
 	classifyListResponse,
+	cleanDeviceText,
+	commandKeyword,
+	hasControlChars,
 	isAnswerTo,
+	isAuthCommand,
 	isBadCommand,
 	isListCommand,
+	limitNames,
+	maskCommand,
 	parseBinary,
 	parseHealth,
 	parseNameList,
+	redactForLog,
 	stripListPrefix,
 } from './parsers.js'
 
@@ -29,16 +36,38 @@ const POWER_WARMUP_MS = 15000
 const NAMES_RETRY_MS = 10000
 const NAMES_MAX_ATTEMPTS = 5
 
+// Lower bounds for polling, so the module can never flood the unit (0 still switches polling off).
+const MIN_POLL_INTERVAL_MS = 500
+const MIN_HEALTH_INTERVAL_S = 10
+
+// Repeated warnings of the same kind are written at most this often.
+const WARN_THROTTLE_MS = 10000
+
+// Longest line written to the debug log for one answer.
+const MAX_LOG_LINE = 512
+
+// A host name or IP address: letters, digits, dots, dashes and colons (IPv6) only.
+const HOST_PATTERN = /^[A-Za-z0-9.:-]{1,253}$/
+
 // Commands polled every poll interval while the unit is operating.
 const STATUS_POLL = ['FADER', 'MUTED', 'FORMAT', 'MONITORLEVEL', 'MONITORMUTE']
 
 // Commands polled every health interval while the unit is operating.
 const HEALTH_POLL = ['HEALTH TEMPERATURE', ...BOARDS.map((board) => `HEALTH ${board}VOLTS`)]
 
+/** 0 or less (or not a number) means off; anything else is raised to the minimum. */
+function effectiveInterval(value, minimum) {
+	const num = Number(value)
+	if (!Number.isFinite(num) || num <= 0) return 0
+	return Math.max(minimum, num)
+}
+
 class DatasatAP20Instance extends InstanceBase {
 	constructor(internal) {
 		super(internal)
 
+		this.config = {}
+		this.secrets = {}
 		this.socket = null
 		this.pollTimer = null
 		this.pollActive = false
@@ -53,6 +82,7 @@ class DatasatAP20Instance extends InstanceBase {
 		// Increases on every (dis)connect so stale async work can detect that it is outdated.
 		this.session = 0
 		this.authFailed = false
+		this.setupLevelWarned = false
 		this.errorLogged = false
 		this.lastHealth = 0
 		this.namesLoaded = false
@@ -60,6 +90,16 @@ class DatasatAP20Instance extends InstanceBase {
 		this.namesTimer = null
 		this.namesPromise = null
 		this.warmupTimer = null
+
+		// Fader commands from buttons that the unit has not answered yet, and the level they aim for.
+		// Relative steps build on that level, so quick presses add up instead of all starting from the same value.
+		this.pendingFaderCommands = 0
+		this.faderTarget = null
+
+		// Throttling of repeated warnings
+		this.droppedCommands = 0
+		this.lastDropWarning = 0
+		this.lastOverflowWarning = 0
 
 		// What this particular unit understands (detected after connecting).
 		// power: true = works, false = the unit said BadCommand, null = not known yet (no usable answer so far).
@@ -86,8 +126,9 @@ class DatasatAP20Instance extends InstanceBase {
 		}
 	}
 
-	async init(config) {
-		this.config = config
+	async init(config, _isFirstInit, secrets) {
+		this.config = config ?? {}
+		this.secrets = secrets ?? {}
 
 		this.updateStatus(InstanceStatus.Connecting)
 
@@ -104,8 +145,9 @@ class DatasatAP20Instance extends InstanceBase {
 		this.initConnection()
 	}
 
-	async configUpdated(config) {
-		this.config = config
+	async configUpdated(config, secrets) {
+		this.config = config ?? {}
+		this.secrets = secrets ?? this.secrets
 		this.initConnection()
 	}
 
@@ -134,16 +176,17 @@ class DatasatAP20Instance extends InstanceBase {
 				regex: Regex.IP,
 			},
 			{
-				type: 'textinput',
+				// Stored in Companion's secrets store, not in the connection config that the web interface receives
+				type: 'secret-text',
 				id: 'password',
-				label: 'NetCmd / Setup Password (leave empty if none)',
+				label: 'NetCmd password (leave empty if none). The Setup password works too, but gives more rights than needed.',
 				width: 8,
 				default: '',
 			},
 			{
 				type: 'number',
 				id: 'pollInterval',
-				label: 'Status poll interval (ms, 0 = disable polling)',
+				label: `Status poll interval (ms, 0 = disable polling, minimum ${MIN_POLL_INTERVAL_MS})`,
 				width: 8,
 				default: 2000,
 				min: 0,
@@ -152,7 +195,7 @@ class DatasatAP20Instance extends InstanceBase {
 			{
 				type: 'number',
 				id: 'healthInterval',
-				label: 'Temperature / voltage poll interval (seconds, 0 = disable)',
+				label: `Temperature / voltage poll interval (seconds, 0 = disable, minimum ${MIN_HEALTH_INTERVAL_S})`,
 				width: 8,
 				default: 30,
 				min: 0,
@@ -175,22 +218,58 @@ class DatasatAP20Instance extends InstanceBase {
 		]
 	}
 
+	getPassword() {
+		const password = this.secrets?.password
+		return typeof password === 'string' ? password : ''
+	}
+
+	pollIntervalMs() {
+		return effectiveInterval(this.config.pollInterval, MIN_POLL_INTERVAL_MS)
+	}
+
+	healthIntervalMs() {
+		return effectiveInterval(this.config.healthInterval, MIN_HEALTH_INTERVAL_S) * 1000
+	}
+
 	// ------------------------------------------------------------------
 	// Connection handling
 	// ------------------------------------------------------------------
+
+	/** Check the connection settings before anything is sent. Returns an error message, or null when fine. */
+	checkConfig() {
+		const host = String(this.config.host ?? '').trim()
+		if (host === '') return 'No IP address configured'
+		if (!HOST_PATTERN.test(host)) return 'The IP address contains characters that are not allowed'
+
+		const password = this.getPassword()
+		if (password.length > LIMITS.passwordLength) return 'The password is too long'
+		if (hasControlChars(password)) return 'The password contains characters that cannot be sent'
+
+		return null
+	}
 
 	initConnection() {
 		this.teardownConnection()
 		this.resetDeviceKnowledge()
 
-		if (!this.config.host) {
-			this.updateStatus(InstanceStatus.BadConfig, 'No IP address configured')
+		const problem = this.checkConfig()
+		if (problem) {
+			this.updateStatus(InstanceStatus.BadConfig, problem)
 			return
+		}
+
+		const requestedPoll = Number(this.config.pollInterval)
+		if (requestedPoll > 0 && requestedPoll < MIN_POLL_INTERVAL_MS) {
+			this.log('warn', `Status poll interval raised to the minimum of ${MIN_POLL_INTERVAL_MS} ms`)
+		}
+		const requestedHealth = Number(this.config.healthInterval)
+		if (requestedHealth > 0 && requestedHealth < MIN_HEALTH_INTERVAL_S) {
+			this.log('warn', `Temperature / voltage poll interval raised to the minimum of ${MIN_HEALTH_INTERVAL_S} s`)
 		}
 
 		this.updateStatus(InstanceStatus.Connecting)
 
-		this.socket = new TCPHelper(this.config.host, AP20_PORT)
+		this.socket = new TCPHelper(String(this.config.host).trim(), AP20_PORT)
 
 		this.socket.on('status_change', (status, message) => {
 			this.log('debug', `Socket status: ${status} ${message ?? ''}`)
@@ -256,6 +335,7 @@ class DatasatAP20Instance extends InstanceBase {
 		this.updateStatus(InstanceStatus.Ok)
 		this.rxBuffer = ''
 		this.authFailed = false
+		this.setupLevelWarned = false
 		this.lastHealth = 0
 
 		const session = ++this.session
@@ -272,8 +352,9 @@ class DatasatAP20Instance extends InstanceBase {
 		const alive = () => session === this.session && !this.authFailed
 
 		// Authentication is valid for the duration of this TCP connection
-		if (this.config.password && this.config.password.length > 0) {
-			await this.request(`AUTH ${this.config.password}`)
+		const password = this.getPassword()
+		if (password.length > 0) {
+			await this.request(`AUTH ${password}`)
 			if (!alive()) return
 		}
 
@@ -333,11 +414,11 @@ class DatasatAP20Instance extends InstanceBase {
 		const macrosKind = classifyListResponse(macros, 'MACRONAMES')
 		if (formatsKind !== 'unknown') {
 			this.caps.formatNames = formatsKind === 'list'
-			this.formats = this.caps.formatNames ? parseNameList(stripListPrefix('FORMATNAMES', formats.text)) : []
+			this.formats = this.caps.formatNames ? this.readNameList('FORMATNAMES', formats.text, 'format') : []
 		}
 		if (macrosKind !== 'unknown') {
 			this.caps.macroNames = macrosKind === 'list'
-			this.macros = this.caps.macroNames ? parseNameList(stripListPrefix('MACRONAMES', macros.text)) : []
+			this.macros = this.caps.macroNames ? this.readNameList('MACRONAMES', macros.text, 'macro') : []
 		}
 		this.refreshDefinitions()
 
@@ -354,6 +435,18 @@ class DatasatAP20Instance extends InstanceBase {
 		this.namesLoaded = complete
 		if (!complete) this.scheduleNamesRetry(session)
 		return complete
+	}
+
+	/** Turn a list answer into names, within the limits of LIMITS.names and LIMITS.nameLength. */
+	readNameList(cmd, text, kind) {
+		const { names, skipped } = limitNames(parseNameList(stripListPrefix(cmd, text)))
+		if (skipped > 0) {
+			this.log(
+				'warn',
+				`${skipped} ${kind} name(s) from the unit were left out: at most ${LIMITS.names} names of at most ${LIMITS.nameLength} characters are used`,
+			)
+		}
+		return names
 	}
 
 	scheduleNamesRetry(session) {
@@ -386,8 +479,8 @@ class DatasatAP20Instance extends InstanceBase {
 	startPolling() {
 		this.stopPolling()
 
-		const interval = Number(this.config.pollInterval)
-		if (!interval || interval <= 0) return
+		const interval = this.pollIntervalMs()
+		if (interval <= 0) return
 
 		this.pollActive = true
 		const session = this.session
@@ -429,7 +522,7 @@ class DatasatAP20Instance extends InstanceBase {
 			if (res === null || session !== this.session) return
 		}
 
-		const healthMs = Number(this.config.healthInterval) * 1000
+		const healthMs = this.healthIntervalMs()
 		if (healthMs > 0 && Date.now() - this.lastHealth >= healthMs) {
 			this.lastHealth = Date.now()
 			for (const cmd of HEALTH_POLL) {
@@ -455,12 +548,27 @@ class DatasatAP20Instance extends InstanceBase {
 
 	/**
 	 * Send a command and wait for its answer (one CR-terminated chunk).
-	 * Resolves with { text, lines } or null when not connected or when no answer arrived in time. Never rejects.
+	 * Resolves with { text, lines } or null when not connected, refused, or when no answer arrived in time.
+	 * Never rejects.
 	 */
 	request(cmd, { user = false } = {}) {
 		return new Promise((resolve) => {
+			// Last line of defence: one command per line, never anything that could start a second command
+			if (hasControlChars(cmd) || cmd.length > LIMITS.commandLength) {
+				this.log(
+					'warn',
+					`Refused to send @${commandKeyword(cmd)}: it contains control characters or is longer than ${LIMITS.commandLength} characters`,
+				)
+				resolve(null)
+				return
+			}
 			if (!this.socket || !this.socket.isConnected) {
-				this.log('debug', `Not connected, cannot send: ${commandKeyword(cmd) === 'AUTH' ? 'AUTH ****' : cmd}`)
+				this.log('debug', `Not connected, cannot send: ${maskCommand(cmd)}`)
+				resolve(null)
+				return
+			}
+			if (user && this.userQueue.length >= LIMITS.userQueue) {
+				this.noteDroppedCommand()
 				resolve(null)
 				return
 			}
@@ -468,6 +576,20 @@ class DatasatAP20Instance extends InstanceBase {
 			queue.push({ cmd, resolve, timer: null })
 			this.pump()
 		})
+	}
+
+	/** Too many button presses are waiting for the unit: drop this one and warn now and then. */
+	noteDroppedCommand() {
+		this.droppedCommands++
+		const now = Date.now()
+		if (now - this.lastDropWarning >= WARN_THROTTLE_MS) {
+			this.log(
+				'warn',
+				`The unit is not keeping up: ${this.droppedCommands} command(s) dropped because ${LIMITS.userQueue} were already waiting`,
+			)
+			this.lastDropWarning = now
+			this.droppedCommands = 0
+		}
 	}
 
 	pump() {
@@ -483,14 +605,14 @@ class DatasatAP20Instance extends InstanceBase {
 		}
 
 		this.inflight = item
-		this.log('debug', `TX: @${commandKeyword(item.cmd) === 'AUTH' ? 'AUTH ****' : item.cmd}`)
+		this.log('debug', `TX: @${maskCommand(item.cmd)}`)
 		item.timer = setTimeout(() => {
 			this.log('debug', `No response to @${commandKeyword(item.cmd)}`)
 			this.finishInflight(null)
 		}, RESPONSE_TIMEOUT_MS)
 
 		Promise.resolve(this.socket.send(`@${item.cmd}\r`)).catch((err) => {
-			this.log('debug', `Send failed: ${err.message}`)
+			this.log('warn', `Sending @${commandKeyword(item.cmd)} failed: ${err.message}`)
 		})
 	}
 
@@ -521,19 +643,60 @@ class DatasatAP20Instance extends InstanceBase {
 	 * Protocol: '@' + COMMAND [args] + <CR>  (TN-H413 rev D)
 	 * With logResponse the answer is written to the Companion log, which helps when trying out commands.
 	 */
-	sendCommand(cmd, { logResponse = false } = {}) {
-		this.request(cmd, { user: true }).then((res) => {
-			if (res === null) {
-				if (logResponse) this.log('info', `No response to @${cmd}`)
-				return
-			}
-			if (isBadCommand(res)) {
-				if (commandKeyword(cmd) === 'POWER') this.caps.power = false
-				this.log('warn', `The unit does not support @${commandKeyword(cmd)} (BadCommand)`)
-			} else if (logResponse) {
-				this.log('info', `Response to @${cmd}: ${res.text.replace(/\n/g, ' | ') || '(empty)'}`)
-			}
+	sendCommand(cmd, { logResponse = false, onDone = null } = {}) {
+		this.request(cmd, { user: true })
+			.finally(() => {
+				if (onDone) onDone()
+			})
+			.then((res) => {
+				if (res === null) {
+					if (logResponse) this.log('info', `No response to @${maskCommand(cmd)}`)
+					return
+				}
+				if (isBadCommand(res)) {
+					if (commandKeyword(cmd) === 'POWER') this.caps.power = false
+					this.log('warn', `The unit does not support @${commandKeyword(cmd)} (BadCommand)`)
+				} else if (logResponse) {
+					const answer = redactForLog(res.text.replace(/\n/g, ' | ')).slice(0, MAX_LOG_LINE)
+					this.log('info', `Response to @${maskCommand(cmd)}: ${answer || '(empty)'}`)
+				}
+			})
+			.catch((err) => {
+				this.log('error', `Handling the answer to @${commandKeyword(cmd)} failed: ${err.message}`)
+			})
+	}
+
+	/** The level a relative fader step should start from: the last level sent, or the reported level. */
+	faderBase() {
+		return this.faderTarget ?? this.state.fader
+	}
+
+	/** Set the master fader (in tenths, already within 0 - 100) from a button. */
+	sendFader(tenths) {
+		this.faderTarget = tenths
+		this.pendingFaderCommands++
+		this.sendCommand(`FADER ${tenths}`, {
+			onDone: () => {
+				this.pendingFaderCommands = Math.max(0, this.pendingFaderCommands - 1)
+				if (this.pendingFaderCommands === 0) this.faderTarget = null
+			},
 		})
+	}
+
+	/**
+	 * A command typed by the user in the Send Custom Command action. A leading '@' is accepted.
+	 * AUTH is refused here: the password belongs in the connection settings, where it is kept as a secret.
+	 */
+	sendCustomCommand(raw) {
+		const cmd = String(raw ?? '')
+			.trim()
+			.replace(/^@/, '')
+		if (cmd.length === 0) return
+		if (isAuthCommand(cmd)) {
+			this.log('warn', 'Custom commands cannot send AUTH. Set the password in the connection settings instead.')
+			return
+		}
+		this.sendCommand(cmd, { logResponse: true })
 	}
 
 	// ------------------------------------------------------------------
@@ -559,7 +722,7 @@ class DatasatAP20Instance extends InstanceBase {
 				.filter((line) => line.length > 0)
 			const text = lines.join('\n')
 
-			this.log('debug', `RX: ${text.replace(/\n/g, ' | ') || '(empty)'}`)
+			this.log('debug', `RX: ${redactForLog(text.replace(/\n/g, ' | ')).slice(0, MAX_LOG_LINE) || '(empty)'}`)
 
 			const cmd = this.inflight ? this.inflight.cmd : null
 			// An answer that arrives after its timeout must not be taken for the answer to the next command
@@ -572,6 +735,17 @@ class DatasatAP20Instance extends InstanceBase {
 				this.finishInflight({ text, lines })
 			} else {
 				this.log('debug', `Late answer, still waiting for the answer to @${commandKeyword(cmd)}`)
+			}
+		}
+
+		// Data that never ends in a <CR> must not pile up
+		if (this.rxBuffer.length > LIMITS.rxBuffer) {
+			const dropped = this.rxBuffer.length
+			this.rxBuffer = ''
+			const now = Date.now()
+			if (now - this.lastOverflowWarning >= WARN_THROTTLE_MS) {
+				this.log('warn', `Discarded ${dropped} characters from the unit that did not end in a line break`)
+				this.lastOverflowWarning = now
 			}
 		}
 	}
@@ -588,8 +762,16 @@ class DatasatAP20Instance extends InstanceBase {
 					this.authFailed = true
 					this.updateStatus(InstanceStatus.AuthenticationFailure, 'Wrong password')
 				} else {
-					this.log('info', `Authenticated with ${value} level`)
+					this.log('info', `Authenticated with ${cleanDeviceText(value, 16)} level`)
 					this.updateStatus(InstanceStatus.Ok)
+					if (value === 'SETUP' && !this.setupLevelWarned) {
+						this.setupLevelWarned = true
+						this.log(
+							'warn',
+							'Authenticated with the Setup password. This module only needs the NetCmd password; ' +
+								'with the Setup password a custom command can also change the configuration of the unit.',
+						)
+					}
 				}
 				break
 
@@ -606,17 +788,17 @@ class DatasatAP20Instance extends InstanceBase {
 
 			case 'FADER': {
 				const lvl = parseInt(value, 10)
-				if (!isNaN(lvl)) {
+				if (!isNaN(lvl) && lvl >= 0 && lvl <= 100) {
 					this.state.fader = lvl
 					this.setVariableValues({ fader: (lvl / 10).toFixed(1), fader_raw: lvl })
-					this.checkFeedbacks('faderLevel')
+					this.checkFeedbacks('faderLevel', 'levelBar')
 				}
 				break
 			}
 
 			case 'MUTED': {
-				const m = parseInt(value, 10)
-				if (!isNaN(m)) {
+				const m = parseBinary(value)
+				if (m !== null) {
 					this.state.muted = m
 					this.setVariableValues({ muted: m ? 'Muted' : 'Unmuted' })
 					this.checkFeedbacks('muted')
@@ -624,24 +806,27 @@ class DatasatAP20Instance extends InstanceBase {
 				break
 			}
 
-			case 'FORMAT':
-				this.state.format = value
-				this.setVariableValues({ format: value })
+			case 'FORMAT': {
+				const format = cleanDeviceText(value, LIMITS.nameLength)
+				this.state.format = format
+				this.setVariableValues({ format })
 				this.checkFeedbacks('format')
 				break
+			}
 
 			case 'MONITORLEVEL': {
 				const lvl = parseInt(value, 10)
-				if (!isNaN(lvl)) {
+				if (!isNaN(lvl) && lvl >= 0 && lvl <= 100) {
 					this.state.monitorLevel = lvl
 					this.setVariableValues({ monitor_level: lvl })
+					this.checkFeedbacks('levelBar')
 				}
 				break
 			}
 
 			case 'MONITORMUTE': {
-				const m = parseInt(value, 10)
-				if (!isNaN(m)) {
+				const m = parseBinary(value)
+				if (m !== null) {
 					this.state.monitorMute = m
 					this.setVariableValues({ monitor_mute: m ? 'Muted' : 'Unmuted' })
 					this.checkFeedbacks('monitorMute')
@@ -653,22 +838,26 @@ class DatasatAP20Instance extends InstanceBase {
 				this.handleHealth(value)
 				break
 
-			case 'VER':
-				this.state.version = value
-				this.setVariableValues({ version: value })
+			case 'VER': {
+				const version = cleanDeviceText(value, 64)
+				this.state.version = version
+				this.setVariableValues({ version })
 				break
+			}
 
-			case 'SERIALNO':
-				this.state.serial = value
-				this.setVariableValues({ serial: value })
+			case 'SERIALNO': {
+				const serial = cleanDeviceText(value, 64)
+				this.state.serial = serial
+				this.setVariableValues({ serial })
 				break
+			}
 
 			case 'OK':
 				// Macro executed, pulse sent, screensaver changed
 				break
 
 			case 'ERR':
-				this.log('warn', `Device returned error: ${line}`)
+				this.log('warn', `Device returned error: ${cleanDeviceText(line)}`)
 				break
 
 			default:
@@ -737,8 +926,8 @@ class DatasatAP20Instance extends InstanceBase {
 			return
 		}
 
-		const macro = on ? this.config.powerOnMacro : this.config.standbyMacro
-		if (macro && macro.length > 0) {
+		const macro = String((on ? this.config.powerOnMacro : this.config.standbyMacro) ?? '')
+		if (macro.length > 0) {
 			this.sendCommand(`RUNMACRO ${macro}`)
 		} else {
 			this.log('warn', 'The unit does not support @POWER and no fallback macro is set in the module config')
@@ -756,7 +945,7 @@ class DatasatAP20Instance extends InstanceBase {
 		if (info.kind === 'temperature') {
 			const [t1, t2, t3] = info.temps
 			this.state.temps = { t1, t2, t3 }
-			this.setVariableValues({ temp1: t1, temp2: t2, temp3: t3 })
+			this.setVariableValues({ temp1: t1 ?? '', temp2: t2 ?? '', temp3: t3 ?? '' })
 			return
 		}
 
